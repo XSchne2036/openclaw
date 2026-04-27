@@ -307,6 +307,8 @@ import {
 } from "./preemptive-compaction.js";
 import { rewriteSubmittedPromptTranscript } from "./transcript-prompt-rewrite.js";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
+
+import { ensureCustomApiRegistered } from "../../custom-api-registry.js";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ensureCustomApiRegistered("lmstudio-native" as any, streamLMStudioNative as any);
 
