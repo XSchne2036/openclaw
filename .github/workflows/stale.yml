@@ -48,7 +48,7 @@ jobs:
         id: app-token
         continue-on-error: true
         with:
-          app-id: "2729701"
+          app-id: "4692557"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           permission-actions: read
           permission-issues: write
@@ -57,7 +57,7 @@ jobs:
         id: app-token-fallback
         continue-on-error: true
         with:
-          app-id: "2971289"
+          app-id: "4692557"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY_FALLBACK }}
           permission-actions: read
           permission-issues: write
@@ -256,7 +256,7 @@ jobs:
         id: app-token
         continue-on-error: true
         with:
-          app-id: "2729701"
+          app-id: "4692557"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           permission-issues: write
           permission-metadata: read
@@ -264,7 +264,7 @@ jobs:
         id: app-token-fallback
         continue-on-error: true
         with:
-          app-id: "2971289"
+          app-id: "4692557"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY_FALLBACK }}
           permission-issues: write
           permission-metadata: read
@@ -440,7 +440,7 @@ jobs:
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         id: app-token
         with:
-          app-id: "2971289"
+          app-id: "4692557"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY_FALLBACK }}
           permission-issues: write
           permission-metadata: read
@@ -792,7 +792,7 @@ jobs:
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         id: app-token
         with:
-          app-id: "2729701"
+          app-id: "4692557"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
           permission-issues: write
           permission-metadata: read
