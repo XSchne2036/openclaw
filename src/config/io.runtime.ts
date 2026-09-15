@@ -1,9 +1,16 @@
 import fs from "node:fs";
 import { expectDefined } from "@openclaw/normalization-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { loadDotEnvAsync } from "../infra/dotenv.js";
 import { formatErrorMessage } from "../infra/errors.js";
+import { tryProcessCwd } from "../infra/safe-cwd.js";
 import { recordUpdateDoctorConfigWrite } from "../infra/update-doctor-result.js";
-import { cloneEnvWithPlatformSemantics, createConfigRuntimeEnvBase } from "./config-env-vars.js";
+import {
+  cloneEnvWithPlatformSemantics,
+  createConfigRuntimeEnvBase,
+  prepareConfigRuntimeEnvLoad,
+  type PreparedConfigRuntimeEnv,
+} from "./config-env-vars.js";
 import { resolveManagedUnsetPathsForWrite } from "./config-path-mutation.js";
 import { assertConfigWriteAllowedInCurrentMode } from "./config-write-guard.js";
 import { resolveWriteEnvSnapshotForPath } from "./env-preserve.js";
@@ -27,6 +34,7 @@ import type {
   ReadConfigFileSnapshotWithPluginMetadataResult,
 } from "./io.types.js";
 import { ConfigRuntimeRefreshError, configWritePostCommitRollback } from "./io.types.js";
+import { logConfigWarningsOnce } from "./io.warnings.js";
 import { ConfigWritePostCommitError, type ConfigWriteRollbackStatus } from "./io.write-errors.js";
 import { rollbackConfigFileWriteIfUnchanged } from "./io.write-safety.js";
 import { formatConfigIssueSummary } from "./issue-format.js";
@@ -39,6 +47,7 @@ import {
   getRuntimeConfigSourceSnapshot,
   hasManagedRuntimeConfigWriteOwner,
   loadPinnedRuntimeConfig,
+  loadPinnedRuntimeConfigAsync,
   notifyRuntimeConfigWriteListeners,
   preflightManagedRuntimeConfigWrite,
   preflightRuntimeSnapshotWrite,
@@ -121,20 +130,132 @@ export function getRuntimeConfig(options?: {
   return loadConfig(options);
 }
 
-/** Revalidate disk policy at a synchronous effect boundary without observing or repairing state. */
-export function readCurrentConfigForPolicyCheck(params: {
-  configPath: string;
-  env: NodeJS.ProcessEnv;
-}): OpenClawConfig {
+/** Capture the config source before a task read, and load only if its owner needs config facts. */
+export function captureRuntimeConfigAsyncReader(
+  options: { assertCurrent?: () => void } = {},
+): () => Promise<OpenClawConfig> {
+  const sourceEnv = process.env;
+  const cwd = tryProcessCwd();
+  const readSelectors = () =>
+    new Map([...GATEWAY_CONFIG_SELECTION_ENV_KEYS].map((key) => [key, sourceEnv[key]]));
+  let selectors = readSelectors();
+  const stage = prepareConfigRuntimeEnvLoad({ previousConfig: {} });
+  // Legacy cold IO chooses the root config path before dotenv changes the environment.
+  const io = createConfigIO({ env: stage.env });
+  const assertCurrent = () => {
+    options.assertCurrent?.();
+    if (
+      process.env !== sourceEnv ||
+      tryProcessCwd() !== cwd ||
+      [...selectors].some(([key, value]) => sourceEnv[key] !== value)
+    ) {
+      throw new Error("Runtime config source changed during asynchronous preparation");
+    }
+  };
+  const preparePublication = (prepared: PreparedConfigRuntimeEnv): PreparedConfigRuntimeEnv => ({
+    env: prepared.env,
+    publish: () => {
+      assertCurrent();
+      const previousSelectors = selectors;
+      const publication = prepared.publish();
+      // Only this canonical publication may advance the captured selector facts.
+      selectors = readSelectors();
+      return Object.assign(
+        () => {
+          publication();
+          selectors = previousSelectors;
+        },
+        { commit: () => publication.commit() },
+      );
+    },
+  });
+  let pending: Promise<OpenClawConfig> | undefined;
+  return () => {
+    assertCurrent();
+    return (pending ??= loadPinnedRuntimeConfigAsync(
+      async (assertPinned) => {
+        try {
+          assertPinned();
+          try {
+            await loadDotEnvAsync({ env: stage.env, quiet: true, cwd });
+          } finally {
+            stage.captureDotEnvBaseline();
+          }
+          assertPinned();
+          const config = await io.loadConfigAsync({ assertCurrent: assertPinned });
+          assertPinned();
+          return { config, runtimeEnv: preparePublication(stage.prepare(config)) };
+        } catch (error) {
+          assertPinned();
+          const publication = preparePublication(stage.prepareFailure()).publish();
+          publication.commit();
+          throw error;
+        }
+      },
+      { assertCurrent },
+    ));
+  };
+}
+
+function createCurrentConfigReader(params: { configPath?: string; env?: NodeJS.ProcessEnv }) {
   return createConfigIO({
     configPath: params.configPath,
-    env: cloneEnvWithPlatformSemantics(params.env),
+    env: cloneEnvWithPlatformSemantics(params.env ?? process.env),
     observe: false,
     pluginValidation: "core-only",
     shellEnvFallback: "defer",
     suppressFutureVersionWarning: true,
     logger: { warn: () => {}, error: () => {} },
-  }).loadConfig({ skipSuspiciousRecovery: true });
+  });
+}
+
+/** Inspection may degrade location selection; it never admits invalid config for state repairs. */
+export function readCurrentConfigForResolution(
+  params: { config?: OpenClawConfig; configPath?: string; env?: NodeJS.ProcessEnv } = {},
+): {
+  config: OpenClawConfig;
+  env: NodeJS.ProcessEnv;
+  configDiagnostics: BestEffortConfigSnapshot["configDiagnostics"];
+} {
+  if (params.config) {
+    return { config: params.config, env: params.env ?? process.env, configDiagnostics: null };
+  }
+  const io = createCurrentConfigReader(params);
+  let config: OpenClawConfig | undefined;
+  try {
+    const loaded = io.loadConfig({ skipSuspiciousRecovery: true });
+    if (fs.existsSync(io.configPath)) {
+      config = loaded;
+    }
+  } catch {
+    // Directory inspection preserves access even when the config cannot be loaded.
+  }
+  const issues = config
+    ? []
+    : [
+        {
+          path: io.configPath,
+          message: "Config unavailable; using environment and default agent directory settings.",
+        },
+      ];
+  logConfigWarningsOnce({
+    configPath: `${io.configPath}#directory-resolution`,
+    warnings: issues,
+    logger: console,
+  });
+  return {
+    config: config ?? {},
+    env: io.env,
+    configDiagnostics: config ? null : { path: io.configPath, issues },
+  };
+}
+
+/** Revalidate disk policy at a synchronous effect boundary without observing or repairing state. */
+export function readCurrentConfigForPolicyCheck(params: {
+  configPath: string;
+  env: NodeJS.ProcessEnv;
+}): OpenClawConfig {
+  return createCurrentConfigReader(params).loadConfig({ skipSuspiciousRecovery: true });
 }
 
 export async function readBestEffortConfig(options?: {
